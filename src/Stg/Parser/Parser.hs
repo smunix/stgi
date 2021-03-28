@@ -1,8 +1,8 @@
-{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE OverloadedLists            #-}
-{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | A parser for the STG language, modeled after the grammar given in the
 -- description in the 1992 paper
@@ -20,9 +20,8 @@
 --     @{free} \\n {bound} -> body@, which uses comma-separated lists. The
 --     update flag @\\u@ is signified using a double arrow @=>@ instead of the
 --     normal arrow @->@.
-module Stg.Parser.Parser (
-
-    -- * General parsing
+module Stg.Parser.Parser
+  ( -- * General parsing
     parse,
     StgParser,
 
@@ -41,37 +40,36 @@ module Stg.Parser.Parser (
     atom,
     var,
     con,
-) where
+  )
+where
 
+import Control.Applicative
+import Control.Monad
+import Data.Char (isSpace)
+import Data.Functor
+import Data.List as L
+import qualified Data.List.NonEmpty as NonEmpty
+import qualified Data.Map.Strict as M
+import Data.Maybe
+import Data.Text (Text)
+import qualified Data.Text as T
+-- import           Text.PrettyPrint.ANSI.Leijen (Doc)
 
-
-import           Control.Applicative
-import           Control.Monad
-import           Data.Char                    (isSpace)
-import           Data.List                    as L
-import           Data.Functor
-import qualified Data.List.NonEmpty           as NonEmpty
-import qualified Data.Map.Strict              as M
-import           Data.Maybe
-import           Data.Text                    (Text)
-import qualified Data.Text                    as T
-import           Text.Parser.Token.Highlight
-import           Text.PrettyPrint.ANSI.Leijen (Doc)
-import           Text.Trifecta                as Trifecta
-
+import Prettyprinter (Doc)
+import Prettyprinter.Render.Terminal (AnsiStyle)
 import Stg.Language
-
-
+import Text.Parser.Token.Highlight
+import Text.Trifecta as Trifecta
 
 -- | Parse STG source using a user-specified parser. To parse a full program,
 -- use @'parse' 'program'@.
 --
 -- >>> parse program "id = \\x -> x"
 -- Right (Program (Binds [(Var "id",LambdaForm [] NoUpdate [Var "x"] (AppF (Var "x") []))]))
-parse :: StgParser ast -> Text -> Either Doc ast
+parse :: StgParser ast -> Text -> Either (Doc AnsiStyle) ast
 parse (StgParser p) input = case parseString (whiteSpace *> p <* eof) mempty (T.unpack input) of
-    Success a -> Right a
-    Failure ErrInfo{ _errDoc = e } -> Left e
+  Success a -> Right a
+  Failure ErrInfo {_errDoc = e} -> Left e
 
 -- | Skip a certain token. Useful to consume, but not otherwise use, certain
 -- tokens.
@@ -80,20 +78,22 @@ skipToken = void . token
 
 -- | A parser for an STG syntax element.
 newtype StgParser ast = StgParser (Trifecta.Parser ast)
-    deriving (CharParsing, Parsing, Alternative, Applicative, Functor, Monad)
+  deriving (CharParsing, Parsing, Alternative, Applicative, Functor, Monad, MonadFail)
 
 instance TokenParsing StgParser where
-    someSpace = skipMany (void (satisfy isSpace) <|> comment)
+  someSpace = skipMany (void (satisfy isSpace) <|> comment)
 
 -- | Syntax rules for parsing variable-looking like identifiers.
 varId :: IdentifierStyle StgParser
-varId = IdentifierStyle
-    { _styleName = "variable"
-    , _styleStart = lower <|> char '_'
-    , _styleLetter = alphaNum <|> oneOf "_'"
-    , _styleReserved = ["let", "letrec", "in", "case", "of", "default"]
-    , _styleHighlight = Identifier
-    , _styleReservedHighlight = ReservedIdentifier }
+varId =
+  IdentifierStyle
+    { _styleName = "variable",
+      _styleStart = lower <|> char '_',
+      _styleLetter = alphaNum <|> oneOf "_'",
+      _styleReserved = ["let", "letrec", "in", "case", "of", "default"],
+      _styleHighlight = Identifier,
+      _styleReservedHighlight = ReservedIdentifier
+    }
 
 -- | Parse a variable identifier. Variables start with a lower-case letter or
 -- @_@, followed by a string consisting of alphanumeric characters or @'@, @_@.
@@ -110,11 +110,14 @@ reserved = reserveText varId
 con :: StgParser Constr
 con = highlight Constructor constructor <?> "constructor"
   where
-    constructor = token (do
-        start <- upper
-        body  <- many (alphaNum <|> oneOf "_'")
-        end   <- string "#" <|> pure ""
-        (pure . Constr . T.pack) (start : body <> end) )
+    constructor =
+      token
+        ( do
+            start <- upper
+            body <- many (alphaNum <|> oneOf "_'")
+            end <- string "#" <|> pure ""
+            (pure . Constr . T.pack) (start : body <> end)
+        )
 
 -- | Parse an STG program.
 program :: StgParser Program
@@ -131,7 +134,7 @@ binds = bindings <?> "non-empty list of bindings"
 comment :: StgParser ()
 comment = skipToken (highlight Comment (lineComment <|> blockComment)) <?> ""
   where
-    lineComment  = try (symbol "--") *> manyTill anyChar (char '\n')
+    lineComment = try (symbol "--") *> manyTill anyChar (char '\n')
     blockComment = try (symbol "{-") *> manyTill anyChar (try (symbol "-}"))
 
 -- | Parse a lambda form, consisting of a list of free variables, and update
@@ -140,29 +143,33 @@ lambdaForm :: StgParser LambdaForm
 lambdaForm = lf >>= validateLambda <?> "lambda form"
   where
     lf :: StgParser LambdaForm
-    lf = (\free bound upd body -> LambdaForm free upd bound body)
-         <$  token (char '\\')
-         <*> (parens (some var) <|> pure [])
-         <*> many var
-         <*> updateArrow
-         <*> expr
+    lf =
+      (\free bound upd body -> LambdaForm free upd bound body)
+        <$ token (char '\\')
+        <*> (parens (some var) <|> pure [])
+        <*> many var
+        <*> updateArrow
+        <*> expr
 
     validateLambda = \case
-        LambdaForm _ Update [] AppC{} ->
-            fail "Standard constructors are never updatable (\"=>\" instead of \"->\")"
-        LambdaForm _ Update (_:_) _ ->
-            fail "Lambda forms with non-empty argument lists are never updatable (\"=>\" instead of \"->\")"
-        LambdaForm _ _ _ LitE{} ->
-            fail "No lambda form has primitive type like 1#; primitives must be boxed, e.g. Int# (1#)"
-        LambdaForm _ _ _ AppP{} ->
-            fail "No lambda form has primitive type like \"+# a b\"; only \"case\" can evaluate them"
-        x -> pure x
+      LambdaForm _ Update [] AppC {} ->
+        fail "Standard constructors are never updatable (\"=>\" instead of \"->\")"
+      LambdaForm _ Update (_ : _) _ ->
+        fail "Lambda forms with non-empty argument lists are never updatable (\"=>\" instead of \"->\")"
+      LambdaForm _ _ _ LitE {} ->
+        fail "No lambda form has primitive type like 1#; primitives must be boxed, e.g. Int# (1#)"
+      LambdaForm _ _ _ AppP {} ->
+        fail "No lambda form has primitive type like \"+# a b\"; only \"case\" can evaluate them"
+      x -> pure x
 
     -- Parse an update flag arrow. @->@ means no update, @=>@ update.
     updateArrow :: StgParser UpdateFlag
-    updateArrow = token (symbol "->" $> NoUpdate
-                     <|> symbol "=>" $> Update
-                     <?> "update arrow" )
+    updateArrow =
+      token
+        ( symbol "->" $> NoUpdate
+            <|> symbol "=>" $> Update
+            <?> "update arrow"
+        )
 
 -- | Parse an arrow token, @->@.
 arrow :: StgParser ()
@@ -181,16 +188,18 @@ expr = choice [let', case', appF, appC, appP, lit] <?> "expression"
   where
     let', case', appF, appC, appP, lit :: StgParser Expr
 
-    let' = Let
+    let' =
+      Let
         <$> (Recursive <$ reserved "letrec" <|> NonRecursive <$ reserved "let")
         <*> binds
-        <*  reserved "in"
+        <* reserved "in"
         <*> expr
         <?> "let(rec)"
-    case' = Case
-        <$  reserved "case"
+    case' =
+      Case
+        <$ reserved "case"
         <*> (expr <?> "expression (as case scrutinee)")
-        <*  reserved "of"
+        <* reserved "of"
         <*> alts
         <?> "case expression"
     appF = AppF <$> var <*> many atom <?> "function application"
@@ -200,16 +209,18 @@ expr = choice [let', case', appF, appC, appP, lit] <?> "expression"
 
 -- | Parse the alternatives given in a @case@ expression.
 alts :: StgParser Alts
-alts = Alts
-       <$> nonDefaultAlts
-       <*> defaultAlt
-       <?> "case alternatives"
+alts =
+  Alts
+    <$> nonDefaultAlts
+    <*> defaultAlt
+    <?> "case alternatives"
 
 -- | Parse an atom
 atom :: StgParser Atom
-atom = AtomVar <$> var
-   <|> AtomLit <$> literal
-   <?> "atom (variable or literal)"
+atom =
+  AtomVar <$> var
+    <|> AtomLit <$> literal
+    <?> "atom (variable or literal)"
 
 -- | Parse a primitive operation.
 --
@@ -219,17 +230,19 @@ atom = AtomVar <$> var
 primOp :: StgParser PrimOp
 primOp = choice ops <?> "primitive function"
   where
-    ops = [ "+"  ~> Add
-          , "-"  ~> Sub
-          , "*"  ~> Mul
-          , "/"  ~> Div
-          , "%"  ~> Mod
-          , "<"  ~> Lt
-          , "<=" ~> Leq
-          , "==" ~> Eq
-          , "/=" ~> Neq
-          , ">=" ~> Geq
-          , ">"  ~> Gt ]
+    ops =
+      [ "+" ~> Add,
+        "-" ~> Sub,
+        "*" ~> Mul,
+        "/" ~> Div,
+        "%" ~> Mod,
+        "<" ~> Lt,
+        "<=" ~> Leq,
+        "==" ~> Eq,
+        "/=" ~> Neq,
+        ">=" ~> Geq,
+        ">" ~> Gt
+      ]
     op ~> val = token (try (string op <* char '#')) $> val
 
 -- | Parse an integer literal
@@ -254,10 +267,11 @@ literal = token (Literal <$> integer' <* char '#') <?> "integer literal"
 -- 2# -> ...
 -- @
 nonDefaultAlts :: StgParser NonDefaultAlts
-nonDefaultAlts = AlgebraicAlts . NonEmpty.fromList <$> some algebraicAlt
-             <|> PrimitiveAlts . NonEmpty.fromList <$> some primitiveAlt
-             <|> pure NoNonDefaultAlts
-             <?> "non-default case alternatives"
+nonDefaultAlts =
+  AlgebraicAlts . NonEmpty.fromList <$> some algebraicAlt
+    <|> PrimitiveAlts . NonEmpty.fromList <$> some primitiveAlt
+    <|> pure NoNonDefaultAlts
+    <?> "non-default case alternatives"
 
 -- | Parse a single algebraic alternative.
 --
@@ -265,22 +279,24 @@ nonDefaultAlts = AlgebraicAlts . NonEmpty.fromList <$> some algebraicAlt
 -- Cons x xs -> ...
 -- @
 algebraicAlt :: StgParser AlgebraicAlt
-algebraicAlt = try (AlgebraicAlt <$> con)
-           <*> (many var >>= disallowDuplicates)
-           <*  arrow
-           <*> expr
-           <*  semi
-           <?> "algebraic case alternative"
+algebraicAlt =
+  try (AlgebraicAlt <$> con)
+    <*> (many var >>= disallowDuplicates)
+    <* arrow
+    <*> expr
+    <* semi
+    <?> "algebraic case alternative"
   where
     disallowDuplicates vars = case duplicates vars of
-        [] -> pure vars
-        dups ->
-            let plural = case dups of [_] -> ""; _ -> "s"
-                errMsg = "Duplicate variable" <> plural <> " in binding: "
-                         <> L.intercalate ", " varNames
-                varNames = map (\(Var v) -> T.unpack v) dups
-            in fail errMsg
-    duplicates = mapMaybe (\case (x:_:_) -> Just x; _ -> Nothing) . group . sort
+      [] -> pure vars
+      dups ->
+        let plural = case dups of [_] -> ""; _ -> "s"
+            errMsg =
+              "Duplicate variable" <> plural <> " in binding: "
+                <> L.intercalate ", " varNames
+            varNames = map (\(Var v) -> T.unpack v) dups
+         in fail errMsg
+    duplicates = mapMaybe (\case (x : _ : _) -> Just x; _ -> Nothing) . group . sort
 
 -- | Parse a single primitive alternative, such as @1#@.
 --
@@ -288,7 +304,8 @@ algebraicAlt = try (AlgebraicAlt <$> con)
 -- 1# -> ...
 -- @
 primitiveAlt :: StgParser PrimitiveAlt
-primitiveAlt = try (PrimitiveAlt <$> literal) <* arrow <*> expr <* semi
+primitiveAlt =
+  try (PrimitiveAlt <$> literal) <* arrow <*> expr <* semi
     <?> "primitive case alternative"
 
 -- | Parse the default alternative, taken if none of the other alternatives
@@ -302,6 +319,7 @@ primitiveAlt = try (PrimitiveAlt <$> literal) <* arrow <*> expr <* semi
 -- v -> ...
 -- @
 defaultAlt :: StgParser DefaultAlt
-defaultAlt = DefaultNotBound <$ reserved "default" <* arrow <*> expr
-         <|> DefaultBound <$> var <* arrow <*> expr
-         <?> "default alternative"
+defaultAlt =
+  DefaultNotBound <$ reserved "default" <* arrow <*> expr
+    <|> DefaultBound <$> var <* arrow <*> expr
+    <?> "default alternative"

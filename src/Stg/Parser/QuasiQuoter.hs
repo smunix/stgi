@@ -1,12 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | Quasiquoters for easier generation of STG syntax trees.
 -- The 'stg' quoter is most convenient, I suggest you use it unless you have a
 -- reason not to.
-module Stg.Parser.QuasiQuoter (
-
-    -- * Heuristic quasiquoter
+module Stg.Parser.QuasiQuoter
+  ( -- * Heuristic quasiquoter
     stg,
 
     -- * Specific syntax element quasiquoters
@@ -22,34 +21,34 @@ module Stg.Parser.QuasiQuoter (
     literal,
     primOp,
     atom,
-) where
+  )
+where
 
+import Data.Either
+import Data.Text (Text)
+import qualified Data.Text as T
+import Language.Haskell.TH
+import Language.Haskell.TH.Lift
+import Language.Haskell.TH.Quote
+import Prettyprinter
+import Stg.Language.Prettyprint
+import Stg.Parser.Parser (StgParser, parse)
+import qualified Stg.Parser.Parser as Parser
 
-
-import           Data.Either
-import           Data.Text                    (Text)
-import qualified Data.Text                    as T
-import           Language.Haskell.TH
-import           Language.Haskell.TH.Lift
-import           Language.Haskell.TH.Quote
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<>))
-
-import           Stg.Language.Prettyprint
-import           Stg.Parser.Parser        (StgParser, parse)
-import qualified Stg.Parser.Parser        as Parser
+-- import Text.PrettyPrint.ANSI.Leijen hiding ((<>))
 
 -- $setup
 -- >>> :set -XTemplateHaskell
 -- >>> :set -XQuasiQuotes
 
-
-
 defaultQuoter :: QuasiQuoter
-defaultQuoter = QuasiQuoter
-    { quoteExp  = \_ -> fail "No STG expression quoter implemented"
-    , quotePat  = \_ -> fail "No STG pattern quoter implemented"
-    , quoteType = \_ -> fail "No STG type quoter implemented"
-    , quoteDec  = \_ -> fail "No STG declaration quoter implemented" }
+defaultQuoter =
+  QuasiQuoter
+    { quoteExp = \_ -> fail "No STG expression quoter implemented",
+      quotePat = \_ -> fail "No STG pattern quoter implemented",
+      quoteType = \_ -> fail "No STG type quoter implemented",
+      quoteDec = \_ -> fail "No STG declaration quoter implemented"
+    }
 
 -- | Heuristic quasiquoter for STG language elements.
 -- Tries a number of parsers, and will use the first successful one.
@@ -68,46 +67,50 @@ defaultQuoter = QuasiQuoter
 -- >>> [stg| x |]
 -- AppF (Var "x") []
 stg :: QuasiQuoter
-stg = defaultQuoter { quoteExp = expQuoter }
+stg = defaultQuoter {quoteExp = expQuoter}
   where
     expQuoter inputString =
-        let input = T.pack inputString
-            parses =
-                [ quoteAs "program"        Parser.program        input
-                , quoteAs "lambdaForm"     Parser.lambdaForm     input
-                , quoteAs "expr"           Parser.expr           input
-                , quoteAs "alts"           Parser.alts           input
-                , quoteAs "algebraicAlt"   Parser.algebraicAlt   input
-                , quoteAs "primitiveAlt"   Parser.primitiveAlt   input
-                , quoteAs "defaultAlt"     Parser.defaultAlt     input
-                , quoteAs "literal"        Parser.literal        input
-                , quoteAs "primOp"         Parser.primOp         input
-                , quoteAs "atom"           Parser.atom           input
-                , quoteAs "variable"       Parser.var            input
-                , quoteAs "constructor"    Parser.con            input ]
-        in case partitionEithers parses of
-            (_, ast:_) -> ast
-            (errs, _) -> (fail . T.unpack . T.unlines)
+      let input = T.pack inputString
+          parses =
+            [ quoteAs "program" Parser.program input,
+              quoteAs "lambdaForm" Parser.lambdaForm input,
+              quoteAs "expr" Parser.expr input,
+              quoteAs "alts" Parser.alts input,
+              quoteAs "algebraicAlt" Parser.algebraicAlt input,
+              quoteAs "primitiveAlt" Parser.primitiveAlt input,
+              quoteAs "defaultAlt" Parser.defaultAlt input,
+              quoteAs "literal" Parser.literal input,
+              quoteAs "primOp" Parser.primOp input,
+              quoteAs "atom" Parser.atom input,
+              quoteAs "variable" Parser.var input,
+              quoteAs "constructor" Parser.con input
+            ]
+       in case partitionEithers parses of
+            (_, ast : _) -> ast
+            (errs, _) ->
+              (fail . T.unpack . T.unlines)
                 ("No parse succeeded. Individual errors:" : errs)
-
-    -- | Attempt to parse an input using a certain parser, and return the
-    -- generated expression on success.
     quoteAs :: Lift ast => Text -> Parser.StgParser ast -> Text -> Either Text (Q Exp)
-    quoteAs parserName parser input = fmap lift (case Parser.parse parser input of
-        Left err -> Left (prettyprintOldAnsi ("  -" <+> text (T.unpack parserName) <> ":" <+> plain (align err)))
-        Right r -> Right r )
+    quoteAs parserName parser input =
+      fmap
+        lift
+        ( case Parser.parse parser input of
+            Left err -> Left (renderPlain ("  -" <+> pretty (T.unpack parserName) <> ":" <+> align err))
+            Right r -> Right r
+        )
 
 -- | Build a quasiquoter from a 'Parser'.
-stgQQ
-    :: Lift ast
-    => StgParser ast
-    -> Text -- ^ Name of the parsed syntax element (for error reporting)
-    -> QuasiQuoter
-stgQQ parser elementName = defaultQuoter { quoteExp  = expQuoter }
-    where
+stgQQ ::
+  Lift ast =>
+  StgParser ast ->
+  -- | Name of the parsed syntax element (for error reporting)
+  Text ->
+  QuasiQuoter
+stgQQ parser elementName = defaultQuoter {quoteExp = expQuoter}
+  where
     expQuoter input = case parse parser (T.pack input) of
-        Left err  -> fail (T.unpack ("Invalid STG " <> elementName <> ":\n" <> prettyprintOldAnsi (plain err)))
-        Right ast -> [| ast |]
+      Left err -> fail (T.unpack ("Invalid STG " <> elementName <> ":\n" <> renderPlain err))
+      Right ast -> [|ast|]
 
 -- | Quasiquoter for 'Stg.Language.Program's.
 --

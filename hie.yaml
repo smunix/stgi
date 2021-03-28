@@ -1,0 +1,19 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:stgi"
+
+    - path: "app/Main.hs"
+      component: "stgi:exe:stgi-exe"
+
+    - path: "app/CmdLineArgs.hs"
+      component: "stgi:exe:stgi-exe"
+
+    - path: "app/Stg/RunForPager.hs"
+      component: "stgi:exe:stgi-exe"
+
+    - path: "test/Testsuite"
+      component: "stgi:test:testsuite"
+
+    - path: "test/Doctest"
+      component: "stgi:test:doctest"
